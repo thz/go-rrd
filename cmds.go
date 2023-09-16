@@ -2,6 +2,7 @@ package rrd
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"reflect"
@@ -111,7 +112,7 @@ func (c *Client) fetch(cmd, filename, cf string, r interface{}, options ...inter
 	args := append([]interface{}{filename, cf}, options...)
 	lines, err := c.ExecCmd(NewCmd(cmd).WithArgs(args...))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to exec cmd '%s(%v)': %w", cmd, args, err)
 	}
 
 	v := reflect.Indirect(reflect.ValueOf(r))
@@ -147,6 +148,10 @@ func (c *Client) fetch(cmd, filename, cf string, r interface{}, options ...inter
 
 // Fetch returns the free text results of a fetch command with the given options.
 func (c *Client) Fetch(filename, cf string, options ...interface{}) (*Fetch, error) {
+	return c.FetchWithContext(context.Background(), filename, cf, options)
+}
+
+func (c *Client) FetchWithContext(ctx context.Context, filename, cf string, options ...interface{}) (*Fetch, error) {
 	r := &Fetch{}
 	lines, err := c.fetch("fetch", filename, cf, r, options...)
 	if err != nil {
@@ -469,53 +474,6 @@ func (c *Client) parseTime(lines []string, err error) (time.Time, error) {
 // Last returns the timestamp of the last update to the specified RRD.
 func (c *Client) Last(filename string) (time.Time, error) {
 	return c.parseTime(c.ExecCmd(NewCmd("last").WithArgs(filename)))
-}
-
-// Info represents the configuration information of an RRD.
-type Info struct {
-	Key   string
-	Value interface{}
-}
-
-// Info returns the configuration information for the specified RRD.
-func (c *Client) Info(filename string) ([]*Info, error) {
-	lines, err := c.ExecCmd(NewCmd("info").WithArgs(filename))
-	if err != nil {
-		return nil, err
-	}
-
-	data := make([]*Info, len(lines))
-	for i, l := range lines {
-		parts := strings.SplitN(l, " ", 3)
-		if len(parts) != 3 {
-			return nil, NewInvalidResponseError("info: invalid parts", l)
-		}
-		info := &Info{Key: parts[0]}
-		switch parts[1] {
-		case "2":
-			// string
-			info.Value = parts[2]
-		case "1":
-			// int
-			v, err := strconv.ParseInt(parts[2], 10, 64)
-			if err != nil {
-				return nil, NewInvalidResponseError(fmt.Sprintf("info: invalid int for key %v", info.Key), l)
-			}
-			info.Value = v
-		case "0":
-			// float
-			v, err := strconv.ParseFloat(parts[2], 64)
-			if err != nil {
-				return nil, NewInvalidResponseError(fmt.Sprintf("info: invalid float for key %v", info.Key), l)
-			}
-			info.Value = v
-		default:
-			return nil, NewInvalidResponseError(fmt.Sprintf("info: unknown type %v for key %v", parts[1], info.Key), l)
-		}
-		data[i] = info
-	}
-
-	return data, nil
 }
 
 // Create creates the RRD according to the supplied parameters.

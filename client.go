@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,6 +34,8 @@ type Client struct {
 	network string
 	timeout time.Duration
 	scanner *bufio.Scanner
+
+	m sync.Mutex
 }
 
 // Timeout sets read / write / dial timeout for a rrdcached Client.
@@ -90,6 +93,9 @@ func (c *Client) Exec(cmd string) ([]string, error) {
 
 // ExecCmd executes cmd on the server and returns the response.
 func (c *Client) ExecCmd(cmd *Cmd) ([]string, error) {
+	c.m.Lock()
+	defer c.m.Unlock()
+
 	if err := c.setDeadline(); err != nil {
 		return nil, err
 	}
@@ -97,25 +103,26 @@ func (c *Client) ExecCmd(cmd *Cmd) ([]string, error) {
 	if _, err := c.conn.Write([]byte(cmd.String())); err != nil {
 		return nil, err
 	}
+	fmt.Printf("rrdcached command: [%s]\n", strings.TrimSpace(cmd.String()))
 
 	if err := c.setDeadline(); err != nil {
 		return nil, err
 	}
 
 	if !c.scanner.Scan() {
-		return nil, c.scanErr()
+		return nil, fmt.Errorf("scan error: %w", c.scanErr())
 	}
 
 	l := c.scanner.Text()
 	matches := respRe.FindStringSubmatch(l)
 	if len(matches) != 3 {
-		return nil, NewInvalidResponseError("bad header", l)
+		return nil, fmt.Errorf("not 3 matches: '%s'", l)
 	}
 
 	cnt, err := strconv.Atoi(matches[1])
 	if err != nil {
 		// This should be impossible given the regexp matched.
-		return nil, NewInvalidResponseError("bad header count", l)
+		return nil, fmt.Errorf("failed to convert to int '%s': %w", matches[1], err)
 	}
 
 	switch {
