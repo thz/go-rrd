@@ -5,6 +5,7 @@ package rrd
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -70,15 +72,23 @@ func NewClient(addr string, options ...func(c *Client) error) (*Client, error) {
 			c.addr = fmt.Sprintf("%v:%v", c.addr, DefaultPort)
 		}
 	}
+	err := c.initConnection()
+	if err != nil {
+		return nil, fmt.Errorf("failed to establish initial connection: %w", err)
+	}
+	return c, nil
+}
+
+func (c *Client) initConnection() error {
 	var err error
 	if c.conn, err = net.DialTimeout(c.network, c.addr, c.timeout); err != nil {
-		return nil, err
+		return fmt.Errorf("failed to dial: %w", err)
 	}
 
 	c.scanner = bufio.NewScanner(bufio.NewReader(c.conn))
 	c.scanner.Split(bufio.ScanLines)
 
-	return c, nil
+	return nil
 }
 
 // setDeadline updates the deadline on the connection based on the clients configured timeout.
@@ -100,8 +110,19 @@ func (c *Client) ExecCmd(cmd *Cmd) ([]string, error) {
 		return nil, err
 	}
 
-	if _, err := c.conn.Write([]byte(cmd.String())); err != nil {
-		return nil, err
+	for {
+		if _, err := c.conn.Write([]byte(cmd.String())); err != nil {
+			if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
+				fmt.Printf("write to connection caused [%v]; trying to reestablish connection...\n", err)
+				err2 := c.initConnection()
+				if err2 != nil {
+					return nil, fmt.Errorf("failed to write (%s) and failed to reestablish: %w", err.Error(), err2)
+				}
+				continue
+			}
+			return nil, fmt.Errorf("failed to write: %w", err)
+		}
+		break
 	}
 	fmt.Printf("rrdcached command: [%s]\n", strings.TrimSpace(cmd.String()))
 
