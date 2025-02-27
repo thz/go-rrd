@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,7 +27,8 @@ var (
 	respRe = regexp.MustCompile(`^(-?\d+)\s+(.*)$`)
 
 	// DefaultTimeout is the default read / write / dial timeout for Clients.
-	DefaultTimeout = time.Second * 10
+	DefaultTimeout        = time.Second * 10
+	ErrReconnectionFailed = errors.New("failed to reconnect")
 )
 
 // Client is a rrdcached client.
@@ -101,11 +103,38 @@ func (c *Client) Exec(cmd string) ([]string, error) {
 	return c.ExecCmd(NewCmd(cmd))
 }
 
+func (c *Client) reconnect() error {
+	c.Close()
+	fmt.Fprintf(os.Stderr, "reconnecting to %s\n", c.addr)
+	err := ErrReconnectionFailed
+	for retries := 0; err != nil; retries++ {
+		fmt.Fprintf(os.Stderr, "retrying to connect to %s\n", c.addr)
+		err = c.initConnection()
+		if err == nil {
+			fmt.Fprintf(os.Stderr, "successfully reconnected to %s\n", c.addr)
+			break
+		}
+		fmt.Fprintf(os.Stderr, "failed to reconnect to %s: %v\n", c.addr, err)
+		if retries > 9 {
+			fmt.Fprintf(os.Stderr, "failed to reconnect to %s. giving up.\n", c.addr)
+			return ErrReconnectionFailed
+		}
+		time.Sleep(time.Second * 2)
+	}
+	return nil
+}
+
 // ExecCmd executes cmd on the server and returns the response.
 func (c *Client) ExecCmd(cmd *Cmd) ([]string, error) {
 	c.m.Lock()
 	defer c.m.Unlock()
 
+	if c.conn == nil {
+		errR := c.reconnect()
+		if errR != nil {
+			return nil, fmt.Errorf("failed to connect: %w", errR)
+		}
+	}
 	if err := c.setDeadline(); err != nil {
 		return nil, err
 	}
@@ -114,10 +143,12 @@ func (c *Client) ExecCmd(cmd *Cmd) ([]string, error) {
 		if _, err := c.conn.Write([]byte(cmd.String())); err != nil {
 			if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
 				fmt.Printf("write to connection caused [%v]; trying to reestablish connection...\n", err)
-				err2 := c.initConnection()
+				err2 := c.reconnect()
 				if err2 != nil {
+					fmt.Printf("failed to reestablish connection: %v\n", err2)
 					return nil, fmt.Errorf("failed to write (%s) and failed to reestablish: %w", err.Error(), err2)
 				}
+				fmt.Printf("connection reestablished.\n")
 				continue
 			}
 			return nil, fmt.Errorf("failed to write: %w", err)
@@ -176,6 +207,9 @@ func (c *Client) ExecCmd(cmd *Cmd) ([]string, error) {
 
 // Close closes the connection to the server.
 func (c *Client) Close() error {
+	if c.conn == nil {
+		return nil
+	}
 	errD := c.setDeadline()
 	_, errW := c.conn.Write([]byte("quit"))
 	err := c.conn.Close()
